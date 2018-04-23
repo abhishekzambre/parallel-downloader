@@ -24,3 +24,39 @@ These instructions will get you a copy of the project up and running on your loc
 ### Prerequisites
 
 What things you need to install the software and how to install them.
+
+###### python3
+
+Download and install [python3](https://www.python.org/downloads/) (version: 3.6.5).
+
+###### python3 modules
+
+Below is the dependency modules list.
+
+- os
+- requests
+- threading
+- shutil
+- urllib.request
+- time
+- math
+- hashlib
+- crcmod
+
+## Executing the script
+
+Execute script using below command
+
+```
+python3 main.py
+```
+
+## Verifying the output
+
+After successful execution, the file will be downloaded in the same directory from which the script is executed.
+
+
+## Authors
+
+* **Abhishek Zambre** - [abhiz.me](http://abhiz.me)
+

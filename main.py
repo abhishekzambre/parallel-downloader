@@ -210,4 +210,4 @@ if __name__ == '__main__':
     obj.start_download()
 
     print(obj.get_metadata())
-    obj.get_downloaded_md5()
+    #obj.get_downloaded_md5()
