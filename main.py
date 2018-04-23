@@ -6,9 +6,9 @@ import shutil
 import urllib.request
 import time
 import math
-import hashlib
+import base64
 import queue
-# import crcmod
+import crcmod
 
 
 class Downloader:
@@ -27,9 +27,9 @@ class Downloader:
         self.number_of_threads = number_of_threads  # maximum number of threads
         self.file_size = self.get_file_size()  # remote file's size
         self.if_byte_range = self.is_byte_range_supported()  # if remote server supports byte range
-        self.remote_md5 = self.get_remote_md5()  # remote file's checksum
-        self.if_contains_md5 = True if self.remote_md5 != -1 or self.remote_md5 is not None else False  # if remote file has a checksum
-        self.downloaded_md5 = None  # checksum of a downloaded file
+        self.remote_crc32c = self.get_remote_crc32c()  # remote file's checksum
+        self.if_contains_crc32c = True if self.remote_crc32c != -1 or self.remote_crc32c is not None else False  # if remote file has a checksum
+        self.downloaded_crc32c = None  # checksum of a downloaded file
         self.range_list = list()  # byte range for each download thread
         self.start_time = None  # start time to calculate overall download time
         self.end_time = None  # end time to calculate overall download time
@@ -86,17 +86,17 @@ class Downloader:
         else:
             return True
 
-    def is_contains_md5(self):
-        return self.if_contains_md5
+    def is_contains_crc32c(self):
+        return self.if_contains_crc32c
 
-    def get_remote_md5(self):
-        server_md5_response = requests.head(self.url, headers={'Accept-Encoding': 'identity'}).headers.get(
+    def get_remote_crc32c(self):
+        server_crc32c_response = requests.head(self.url, headers={'Accept-Encoding': 'identity'}).headers.get(
             'x-goog-hash')
-        if server_md5_response:
-            response_split = server_md5_response.split(', ')
+        if server_crc32c_response:
+            response_split = server_crc32c_response.split(', ')
             for response in response_split:
-                if response.startswith("md5"):
-                    return response.split('=')[1]
+                if response.startswith("crc32c"):
+                    return response[7:]
         return None
 
     def start_download(self):
@@ -109,6 +109,8 @@ class Downloader:
             os.makedirs("temp")
 
             self.fill_initial_queue()
+
+            print("Server supports byte range GET. Starting download threads.")
 
             for i in range(self.number_of_threads):
                 worker = threading.Thread(target=self.download_chunk)
@@ -124,13 +126,30 @@ class Downloader:
 
             print(self.current_status)
 
+            print("All chunks downloaded. Merging...")
             with open(self.target_filename, "ab") as target_file:
                 for i in range(self.number_of_threads):
                     with open("temp/part" + str(i), "rb") as chunk_file:
                         target_file.write(chunk_file.read())
 
+            print("Merging finished successfully.")
+
         else:
-            pass
+            print("Server does not support byte range GET. Downloading file at once.")
+            try:
+                self.download_entire_file()
+                print("File '" + self.target_filename + "' downloaded successfully.")
+            except:
+                print("Error occurred while downloading.")
+
+        print("Checking integrity...")
+        integrity_result = self.check_integrity()
+        if not self.remote_crc32c:
+            print("Checksum is not available for a remote file. Integrity check cannot be performed.")
+        elif integrity_result:
+            print("Integrity check is successful.")
+        else:
+            print("Integrity check failed.")
 
         self.end_time = time.time()
 
@@ -167,6 +186,13 @@ class Downloader:
             finally:
                 self.q.task_done()
 
+    def download_entire_file(self):
+        r = requests.get(self.url, stream=True)
+        with open(self.target_filename, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1024):
+                if chunk:  # filter out keep-alive new chunks
+                    f.write(chunk)
+
     def get_status_header(self):
         """Returns header for the download status"""
         status_header = list()
@@ -190,21 +216,17 @@ class Downloader:
         else:
             return True
 
-    def get_downloaded_md5(self):
-        BLOCKSIZE = 65536
-        md5 = hashlib.md5()
-        with open(self.target_filename, 'rb') as target_file:
-            buf = target_file.read(BLOCKSIZE)
-            while len(buf) > 0:
-                md5.update(buf)
-                buf = target_file.read(BLOCKSIZE)
-        print(md5.hexdigest())
-        self.downloaded_md5 = md5.hexdigest()
-        # print(self.downloaded_md5)
+    def get_downloaded_crc32c(self):
+        file_bytes = open(self.target_filename, 'rb').read()
+        crc32c = crcmod.predefined.Crc('crc-32c')
+        crc32c.update(file_bytes)
+        crc32c_value = base64.b64encode(crc32c.digest())
+        self.downloaded_crc32c = str(crc32c_value, 'utf-8')
+        return self.downloaded_crc32c
 
     def check_integrity(self):
-        self.get_downloaded_md5()
-        return self.remote_md5 == self.downloaded_md5
+        self.get_downloaded_crc32c()
+        return self.remote_crc32c == self.downloaded_crc32c
 
     def build_range(self):
         """Creates the list of byte-range to be downloaded by each thread.
@@ -230,14 +252,18 @@ class Downloader:
             "number_of_threads": self.number_of_threads,
             "file_size": self.file_size,
             "if_byte_range": self.if_byte_range,
-            "if_contains_md5": self.if_contains_md5,
-            "remote_md5": self.remote_md5,
-            "downloaded_md5": self.downloaded_md5,
+            "if_contains_crc32c": self.if_contains_crc32c,
+            "remote_crc32c": self.remote_crc32c,
+            "downloaded_crc32c": self.downloaded_crc32c,
             "range_list": self.range_list
         }
 
 
 def getopts(argv):
+    """Parse arguments passed and add them to dictionary
+    :param argv: arguments must be url and threads
+    :return: dictionary of arguments
+    """
     opts = {}  # Empty dictionary to store key-value pairs.
     while argv:  # While there are arguments left to parse...
         if argv[0][0] == '-':  # Found a "-name value" pair.
@@ -266,3 +292,4 @@ if __name__ == '__main__':
     obj.start_download()
 
     print(obj.get_metadata())
+    print(obj.get_downloaded_crc32c())

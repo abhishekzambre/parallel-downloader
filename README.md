@@ -6,10 +6,10 @@ Below functions are performed by the application.
 
 - [x] Check if the file server supports byte range GET requests.
 - [x] If byte range GET is supported, download multiple chunks of the file in parallel.
-- [ ] If byte range GET is not supported, download the whole file at once.
+- [x] If byte range GET is not supported, download the whole file at once.
 - [x] If the file was downloaded in multiple chunks, those chunks must be put back together in the correct order and result in a playable video.
-- [ ] Handling of errors and retries.
-- [ ] Check downloaded file for integrity.
+- [x] Handling of errors and retries.
+- [x] Check downloaded file for integrity.
 - [x] Benchmarks for various chunk sizes for parallel downloads.
 - [x] Limiting the number of concurrent chunks being downloaded to some maximum value.
 - [x] Resuming partially-downloaded chunks on error.
@@ -40,7 +40,7 @@ Below is the dependency modules list.
 - time
 - math
 - hashlib
-- crcmod
+- [crcmod](https://github.com/gsutil-mirrors/crcmod)
 
 ## Executing the script
 
