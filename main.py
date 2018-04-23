@@ -1,4 +1,5 @@
 import os
+import sys
 import requests
 import threading
 import shutil
@@ -6,28 +7,39 @@ import urllib.request
 import time
 import math
 import hashlib
+import queue
 # import crcmod
 
 
 class Downloader:
+    class Item:
+        def __init__(self, chunk_id, chunk_range, was_interrupted=False):
+            self.chunk_id = chunk_id
+            self.chunk_range = chunk_range
+            self.was_interrupted = was_interrupted
+
     def __init__(self, url=None, number_of_threads=1):
         """Constructor of Downloader class
         :param url: URL of file to be downloaded (optional)
         :param number_of_threads: Maximum number of threads (optional)
         """
-        self.url = url
-        self.number_of_threads = number_of_threads
-        self.file_size = self.get_file_size()
-        self.if_byte_range = self.is_byte_range_supported()
-        self.remote_md5 = self.get_remote_md5()
-        self.if_contains_md5 = True if self.remote_md5 != -1 or self.remote_md5 is not None else False
-        self.downloaded_md5 = None
-        self.range_list = list()
-        self.start_time = None
-        self.end_time = None
-        self.target_filename = os.path.basename(self.url)
-        self.status_refresh_rate = 2
-        self.download_durations = [None] * self.number_of_threads
+        self.url = url  # url of a file to be downloaded
+        self.number_of_threads = number_of_threads  # maximum number of threads
+        self.file_size = self.get_file_size()  # remote file's size
+        self.if_byte_range = self.is_byte_range_supported()  # if remote server supports byte range
+        self.remote_md5 = self.get_remote_md5()  # remote file's checksum
+        self.if_contains_md5 = True if self.remote_md5 != -1 or self.remote_md5 is not None else False  # if remote file has a checksum
+        self.downloaded_md5 = None  # checksum of a downloaded file
+        self.range_list = list()  # byte range for each download thread
+        self.start_time = None  # start time to calculate overall download time
+        self.end_time = None  # end time to calculate overall download time
+        self.target_filename = os.path.basename(self.url)  # name of a file to be downloaded
+        self.status_refresh_rate = 2  # status will be refreshed after certain time (in seconds)
+        self.download_durations = [None] * self.number_of_threads  # total download time for each thread (for benchmarking)
+        self.q = queue.Queue(maxsize=0)
+        self.append_write = "wb"
+        self.download_status = list()
+        self.current_status = ""
 
     def get_url(self):
         """Returns URL of a file to be downloaded"""
@@ -68,7 +80,7 @@ class Downloader:
         """Return True if accept-range is supported by the url else False
         :return: boolean
         """
-        server_byte_response = requests.head(self.get_url(), headers={'Accept-Encoding': 'identity'}).headers.get('accept-ranges')
+        server_byte_response = requests.head(self.url, headers={'Accept-Encoding': 'identity'}).headers.get('accept-ranges')
         if not server_byte_response or server_byte_response == "none":
             return False
         else:
@@ -78,7 +90,7 @@ class Downloader:
         return self.if_contains_md5
 
     def get_remote_md5(self):
-        server_md5_response = requests.head(self.get_url(), headers={'Accept-Encoding': 'identity'}).headers.get(
+        server_md5_response = requests.head(self.url, headers={'Accept-Encoding': 'identity'}).headers.get(
             'x-goog-hash')
         if server_md5_response:
             response_split = server_md5_response.split(', ')
@@ -89,52 +101,71 @@ class Downloader:
 
     def start_download(self):
 
-        self.build_range()
-
-        self.clean_temp_dir()
-
         self.start_time = time.time()
 
-        workers = list()
+        if self.if_byte_range:
+            if os.path.isdir("temp"):
+                shutil.rmtree("temp")
+            os.makedirs("temp")
 
-        for chunk_id, chunk_range in enumerate(self.range_list):
-            workers.append(threading.Thread(target=self.download_chunk, args=(chunk_id, chunk_range)))
+            self.fill_initial_queue()
 
-        for th in workers:
-            th.start()
-
-        print(self.get_status_header())
-        while threading.active_count() > 1:
-            print(self.get_download_status())
-            time.sleep(self.status_refresh_rate)
-
-        for th in workers:
-            th.join()
-        print(self.get_download_status())
-
-        with open(self.target_filename, "ab") as target_file:
             for i in range(self.number_of_threads):
-                with open("temp/part" + str(i), "rb") as chunk_file:
-                    target_file.write(chunk_file.read())
+                worker = threading.Thread(target=self.download_chunk)
+                worker.setDaemon(True)
+                worker.start()
+
+            print(self.get_status_header())
+            while self.get_download_status():
+                print(self.current_status)
+                time.sleep(self.status_refresh_rate)
+
+            self.q.join()
+
+            print(self.current_status)
+
+            with open(self.target_filename, "ab") as target_file:
+                for i in range(self.number_of_threads):
+                    with open("temp/part" + str(i), "rb") as chunk_file:
+                        target_file.write(chunk_file.read())
+
+        else:
+            pass
 
         self.end_time = time.time()
 
-    def clean_temp_dir(self):
-        if os.path.isdir("temp"):
-            shutil.rmtree("temp")
-        os.makedirs("temp")
+    def fill_initial_queue(self):
+        self.build_range()
+        for chunk_id, chunk_range in enumerate(self.range_list):
+            self.q.put(self.Item(chunk_id, chunk_range, False))
 
-    def download_chunk(self, chunk_id, chunk_range):
+    def download_chunk(self):
         """Download chunk of a file by providing byte range in download header
-        :param chunk_id: Chunk id to maintain order
-        :param chunk_range: Byte range of a chunk to be downloaded
-        :return:
         """
-        req = urllib.request.Request(self.get_url())
-        req.headers['Range'] = 'bytes={}'.format(chunk_range)
-        with urllib.request.urlopen(req) as response, open('temp/part' + str(chunk_id), 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
-        self.download_durations[chunk_id] = time.time()
+        while True:
+            item = self.q.get()
+            try:
+                if item.was_interrupted:
+                    time.sleep(1)
+                    if os.path.isfile("temp/part" + str(item.chunk_id)):
+                        self.append_write = "ab"
+                        temp = item.chunk_range.split('-')
+                        item.chunk_range = str(int(temp[0]) + os.stat("temp/part" + str(item.chunk_id)).st_size) + '-' + temp[1]
+                    else:
+                        self.append_write = "wb"
+
+                req = urllib.request.Request(self.get_url())
+                req.headers['Range'] = 'bytes={}'.format(item.chunk_range)
+                with urllib.request.urlopen(req) as response, open('temp/part' + str(item.chunk_id), self.append_write) as out_file:
+                    shutil.copyfileobj(response, out_file)
+                self.download_durations[item.chunk_id] = time.time()
+
+            except IOError:
+                item.was_interrupted = True
+                self.q.put(item)
+
+            finally:
+                self.q.task_done()
 
     def get_status_header(self):
         """Returns header for the download status"""
@@ -147,13 +178,17 @@ class Downloader:
         """Returns current download status per thread in string format
         :return: string
         """
-        download_status = list()
+        self.download_status.clear()
         for i in range(self.number_of_threads):
             if os.path.isfile("temp/part" + str(i)):
-                download_status.append(str(round(os.stat("temp/part" + str(i)).st_size/(self.file_size/self.number_of_threads) * 100, 2)) + "%")
+                self.download_status.append(str(round(os.stat("temp/part" + str(i)).st_size/(self.file_size/self.number_of_threads) * 100, 2)) + "%")
             else:
-                download_status.append("0.00%")
-        return '\t\t'.join(download_status)
+                self.download_status.append("0.00%")
+        self.current_status = '\t\t'.join(self.download_status)
+        if all(x == "100.0%" for x in self.download_status):
+            return False
+        else:
+            return True
 
     def get_downloaded_md5(self):
         BLOCKSIZE = 65536
@@ -202,12 +237,32 @@ class Downloader:
         }
 
 
-if __name__ == '__main__':
-    obj = Downloader("https://storage.googleapis.com/vimeo-test/work-at-vimeo-2.mp4", 10)
+def getopts(argv):
+    opts = {}  # Empty dictionary to store key-value pairs.
+    while argv:  # While there are arguments left to parse...
+        if argv[0][0] == '-':  # Found a "-name value" pair.
+            opts[argv[0]] = argv[1]  # Add key and value to the dictionary.
+        argv = argv[1:]  # Reduce the argument list by copying it starting from index 1.
+    return opts
 
+
+if __name__ == '__main__':
+
+    url = ""
+    threads = ""
+    arguments_list = getopts(sys.argv)
+    if '-url' in arguments_list:
+        url = arguments_list['-url']
+    if '-threads' in arguments_list:
+        threads = int(arguments_list['-threads'])
+
+    if not url or not threads:
+        raise ValueError("Please provide required arguments.")
+
+    # obj = Downloader("https://storage.googleapis.com/vimeo-test/work-at-vimeo-2.mp4", 10)
     # obj = Downloader("http://i.imgur.com/z4d4kWk.jpg", 3)
 
+    obj = Downloader(url, threads)
     obj.start_download()
 
     print(obj.get_metadata())
-    #obj.get_downloaded_md5()

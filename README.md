@@ -4,18 +4,16 @@ Python application to download large file in chunks using parallel threads.
 
 Below functions are performed by the application.
 
-1. Check if the file server supports byte range GET requests
-   - If so, download multiple chunks of the file in parallel, otherwise download the whole file at once.
-   - If the file was downloaded in multiple chunks, those chunks must be put back together in the correct order and result in a playable video.
-2. Handle errors and retries.
-3. Check downloaded file for integrity.
-
-Additionally, below bonus functions are performed as well.
-
-1. Benchmarks for various chunk sizes for parallel downloads.
-2. Limiting the number of concurrent chunks being downloaded to some maximum value.
-3. Resuming partially-downloaded chunks on error.
-4. Calculating checksum for integrity check during download rather than at the end.
+- [x] Check if the file server supports byte range GET requests.
+- [x] If byte range GET is supported, download multiple chunks of the file in parallel.
+- [ ] If byte range GET is not supported, download the whole file at once.
+- [x] If the file was downloaded in multiple chunks, those chunks must be put back together in the correct order and result in a playable video.
+- [ ] Handling of errors and retries.
+- [ ] Check downloaded file for integrity.
+- [x] Benchmarks for various chunk sizes for parallel downloads.
+- [x] Limiting the number of concurrent chunks being downloaded to some maximum value.
+- [x] Resuming partially-downloaded chunks on error.
+- [ ] Calculating checksum for integrity check during download rather than at the end.
 
 ## Getting Started
 
@@ -37,6 +35,7 @@ Below is the dependency modules list.
 - requests
 - threading
 - shutil
+- queue
 - urllib.request
 - time
 - math
@@ -45,16 +44,29 @@ Below is the dependency modules list.
 
 ## Executing the script
 
-Execute script using below command
+Execute script with arguments as follows.
 
+- url: URL of a remote file to be downloaded.
+- threads: Number of parallel threads.
+
+For example:
 ```
-python3 main.py
+python3 main.py -url "https://storage.googleapis.com/vimeo-test/work-at-vimeo-2.mp4" -threads 10
 ```
 
 ## Verifying the output
 
 After successful execution, the file will be downloaded in the same directory from which the script is executed.
 
+## Implementation
+
+TBD
+
+## Future Scope
+
+- Custom download location.
+- Graphical User Interface using libraries such as [Tkinter](https://wiki.python.org/moin/TkInter) or [Kivy](https://kivy.org/)
+- Support for variety of integrity check algorithms.
 
 ## Authors
 
