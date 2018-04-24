@@ -4,6 +4,7 @@ import requests
 import threading
 import shutil
 import urllib.request
+import timeit
 import time
 import math
 import base64
@@ -13,10 +14,11 @@ import crcmod
 
 class Downloader:
     class Item:
+        """Job queue item class"""
         def __init__(self, chunk_id, chunk_range, was_interrupted=False):
-            self.chunk_id = chunk_id
-            self.chunk_range = chunk_range
-            self.was_interrupted = was_interrupted
+            self.chunk_id = chunk_id  # chunk id to be downloaded
+            self.chunk_range = chunk_range  # chunk range to download from server
+            self.was_interrupted = was_interrupted  # flag to denote if the job was interrupted due to some error
 
     def __init__(self, url=None, number_of_threads=1):
         """Constructor of Downloader class
@@ -36,10 +38,10 @@ class Downloader:
         self.target_filename = os.path.basename(self.url)  # name of a file to be downloaded
         self.status_refresh_rate = 2  # status will be refreshed after certain time (in seconds)
         self.download_durations = [None] * self.number_of_threads  # total download time for each thread (for benchmarking)
-        self.q = queue.Queue(maxsize=0)
-        self.append_write = "wb"
-        self.download_status = list()
-        self.current_status = ""
+        self.q = queue.Queue(maxsize=0)  # worker threads will pick download job from the queue
+        self.append_write = "wb"  # default mode will be write in binary
+        self.download_status = list()  # current download job status of each thread (for benchmarking)
+        self.current_status = ""  # current overall status
 
     def get_url(self):
         """Returns URL of a file to be downloaded"""
@@ -100,22 +102,35 @@ class Downloader:
         return None
 
     def start_download(self):
+        """If byte range is supported by server, perform below steps:
+            1. Delete temp folder if exists
+            2. Fill queue with number of jobs = number of threads
+            3. Start worker threads
+            4. Keep checking status until all worker downloads reach 100%
+            5. Wait till all download complete
+            6. Merge chunks of files into a single file
+            7. Delete temp folder
 
-        self.start_time = time.time()
+        If byte range is not supported server, download file entirely.
+        """
+        self.start_time = timeit.default_timer()
+
+        print("Server support byte range GET? ... ", end="")
 
         if self.if_byte_range:
+            print("Yes")
             if os.path.isdir("temp"):
                 shutil.rmtree("temp")
             os.makedirs("temp")
 
             self.fill_initial_queue()
 
-            print("Server supports byte range GET. Starting download threads.")
-
+            print("Starting download threads ... ", end="")
             for i in range(self.number_of_threads):
                 worker = threading.Thread(target=self.download_chunk)
                 worker.setDaemon(True)
                 worker.start()
+            print("Done")
 
             print(self.get_status_header())
             while self.get_download_status():
@@ -126,41 +141,48 @@ class Downloader:
 
             print(self.current_status)
 
-            print("All chunks downloaded. Merging...")
+            print("File chunks download ... Done")
+            print("Merging chunks into a single file ... ", end="")
             with open(self.target_filename, "ab") as target_file:
                 for i in range(self.number_of_threads):
                     with open("temp/part" + str(i), "rb") as chunk_file:
                         target_file.write(chunk_file.read())
+            print("Done")
 
-            print("Merging finished successfully.")
+            if os.path.isdir("temp"):
+                shutil.rmtree("temp")
 
         else:
-            print("Server does not support byte range GET. Downloading file at once.")
+            print("No")
             try:
+                print("Download file at once ... ", end="")
                 self.download_entire_file()
-                print("File '" + self.target_filename + "' downloaded successfully.")
+                print("Done")
             except:
                 print("Error occurred while downloading.")
 
-        print("Checking integrity...")
+        print("Checking integrity ... ", end="")
         integrity_result = self.check_integrity()
         if not self.remote_crc32c:
             print("Checksum is not available for a remote file. Integrity check cannot be performed.")
         elif integrity_result:
-            print("Integrity check is successful.")
+            print("Successful")
         else:
-            print("Integrity check failed.")
+            print("Failed")
 
-        self.end_time = time.time()
+        self.end_time = timeit.default_timer()
+
+        print("Displaying benchmarks ... ")
+        self.display_benchmarks()
 
     def fill_initial_queue(self):
+        """Fill the queue at the start of downloading"""
         self.build_range()
         for chunk_id, chunk_range in enumerate(self.range_list):
             self.q.put(self.Item(chunk_id, chunk_range, False))
 
     def download_chunk(self):
-        """Download chunk of a file by providing byte range in download header
-        """
+        """Get job from queue. Download chunk of a file. Range is extracted from job's chunk_range field"""
         while True:
             item = self.q.get()
             try:
@@ -177,7 +199,7 @@ class Downloader:
                 req.headers['Range'] = 'bytes={}'.format(item.chunk_range)
                 with urllib.request.urlopen(req) as response, open('temp/part' + str(item.chunk_id), self.append_write) as out_file:
                     shutil.copyfileobj(response, out_file)
-                self.download_durations[item.chunk_id] = time.time()
+                self.download_durations[item.chunk_id] = timeit.default_timer()
 
             except IOError:
                 item.was_interrupted = True
@@ -187,6 +209,7 @@ class Downloader:
                 self.q.task_done()
 
     def download_entire_file(self):
+        """If byte range is not supported by server, download entire file"""
         r = requests.get(self.url, stream=True)
         with open(self.target_filename, 'wb') as f:
             for chunk in r.iter_content(chunk_size=1024):
@@ -201,7 +224,7 @@ class Downloader:
         return '\t\t'.join(status_header)
 
     def get_download_status(self):
-        """Returns current download status per thread in string format
+        """Returns current download status per thread separated by tabs in a string format
         :return: string
         """
         self.download_status.clear()
@@ -216,7 +239,21 @@ class Downloader:
         else:
             return True
 
+    def display_benchmarks(self):
+        """Disply benchmark results"""
+        print("\nBenchmarking Results:")
+        print("\nTotal time taken for download and integrity check:", round(self.end_time - self.start_time, 2), "seconds.")
+        if self.if_byte_range:
+            print("\nThread\t\tTime Taken\t\tAverage Download Speed")
+            for i in range(self.number_of_threads):
+                total_time = self.download_durations[i] - self.start_time
+                average_speed = ((self.file_size / self.number_of_threads) / total_time) * (8 / (1024 * 1024))
+                print(i+1, "\t\t", round(total_time, 2), "seconds\t\t", round(average_speed, 2), "mbps")
+
     def get_downloaded_crc32c(self):
+        """Compute and returns crc32c checksum of a downloaded file
+        :return: string
+        """
         file_bytes = open(self.target_filename, 'rb').read()
         crc32c = crcmod.predefined.Crc('crc-32c')
         crc32c.update(file_bytes)
@@ -247,6 +284,7 @@ class Downloader:
         return self.target_filename
 
     def get_metadata(self):
+        """Returns object metadata information"""
         return {
             "url": self.url,
             "number_of_threads": self.number_of_threads,
@@ -273,6 +311,13 @@ def getopts(argv):
 
 
 if __name__ == '__main__':
+    """Instead of command line arguments, the script can be run by creating a Downloader object as well.
+    For ex.:
+        1. obj = Downloader("https://storage.googleapis.com/vimeo-test/work-at-vimeo-2.mp4", 10)
+        2. obj = Downloader("http://i.imgur.com/z4d4kWk.jpg", 3)
+        
+    Once objects are created, call start_download function as obj.start_download()
+    """
 
     url = ""
     threads = ""
@@ -285,11 +330,11 @@ if __name__ == '__main__':
     if not url or not threads:
         raise ValueError("Please provide required arguments.")
 
+    obj = Downloader(url, threads)
     # obj = Downloader("https://storage.googleapis.com/vimeo-test/work-at-vimeo-2.mp4", 10)
     # obj = Downloader("http://i.imgur.com/z4d4kWk.jpg", 3)
 
-    obj = Downloader(url, threads)
     obj.start_download()
-
     print(obj.get_metadata())
+    print(obj.get_remote_crc32c())
     print(obj.get_downloaded_crc32c())
